@@ -31,7 +31,7 @@
 
         <!-- Play: tune by ear -->
         <section class="pane" id="pane-play">
-          <div id="string-grid"></div>
+          <div id="headstock-wrap"></div>
           <label class="toggle-row">
             <input type="checkbox" id="repeat-check">
             <span>Auto-repeat every 3&thinsp;s</span>
@@ -75,6 +75,13 @@
       <div class="setting-group">
         <div class="setting-label">Tuning</div>
         <div id="tuning-row" class="chip-row"></div>
+      </div>
+      <div class="setting-group">
+        <div class="setting-label">Guitar</div>
+        <div id="guitar-row" class="chip-row">
+          <button class="chip guitar-chip" data-guitar="acoustic">Acoustic</button>
+          <button class="chip guitar-chip" data-guitar="electric">Electric</button>
+        </div>
       </div>
       <div class="setting-group">
         <div class="setting-label">Calibration</div>

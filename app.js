@@ -16,6 +16,7 @@ const state = {
   a4: 440,
   lock: "auto",       // "auto" (chromatic) | "strings"
   repeat: false,
+  guitar: "acoustic", // "acoustic" (3+3) | "electric" (6-in-line)
 };
 
 const A4_MIN = 430, A4_MAX = 450;
@@ -28,6 +29,7 @@ function loadState() {
     if (saved.a4 >= A4_MIN && saved.a4 <= A4_MAX) state.a4 = Math.round(saved.a4);
     if (["auto", "strings"].includes(saved.lock)) state.lock = saved.lock;
     if (typeof saved.repeat === "boolean") state.repeat = saved.repeat;
+    if (["acoustic", "electric"].includes(saved.guitar)) state.guitar = saved.guitar;
   } catch (e) { /* corrupted storage — use defaults */ }
 }
 
@@ -103,13 +105,15 @@ function getPluckBuffer(midi) {
   const df = d - di;
   const init = di + 3;
 
-  // Excitation: lightly lowpassed noise for a softer pick attack…
+  // Excitation: lowpassed noise for a softer pick attack…
   let prev = 0;
   for (let i = 0; i < init; i++) {
     const w = Math.random() * 2 - 1;
     data[i] = (w + prev) / 2;
     prev = w;
   }
+  let p = 0;
+  for (let i = 0; i < init; i++) { data[i] = (data[i] + p) / 2; p = data[i]; }
   // …with a pick-position comb (~12% along the string) for realism.
   const pick = Math.max(1, Math.round(period * 0.12));
   for (let i = init - 1; i >= pick; i--) data[i] -= 0.5 * data[i - pick];
@@ -121,6 +125,19 @@ function getPluckBuffer(midi) {
     const x1 = data[i - di - 1] * (1 - df) + data[i - di - 2] * df;
     data[i] = g * 0.5 * (x0 + x1);
   }
+
+  // Round off the pick transient: blend in a lowpassed copy over the
+  // first 80 ms, strongest at the very start, then a short fade-in so
+  // the onset has no instantaneous edge.
+  const soft = Math.floor(sr * 0.08);
+  let lp = 0;
+  for (let i = 0; i < soft; i++) {
+    lp += 0.22 * (data[i] - lp);
+    const mix = 1 - i / soft;
+    data[i] = data[i] * (1 - mix) + lp * mix;
+  }
+  const fadeIn = Math.floor(sr * 0.012);
+  for (let i = 0; i < fadeIn; i++) data[i] *= i / fadeIn;
 
   // Normalize and fade the tail to silence.
   let peak = 0;
@@ -361,7 +378,7 @@ const paneListen = $("pane-listen");
 const tabPlay = $("tab-play");
 const tabListen = $("tab-listen");
 const tabUnderline = $("tab-underline");
-const stringGrid = $("string-grid");
+const headstockWrap = $("headstock-wrap");
 const glow = $("glow");
 const needle = $("needle");
 const noteName = $("note-name");
@@ -455,25 +472,84 @@ paneViewport.addEventListener("touchcancel", () => {
   swiping = false;
 });
 
-/* ================= UI: string buttons ================= */
+/* ================= UI: headstock ================= */
 
 let lastString = null; // index into current tuning, for auto-repeat
 let ringTimer = null;
 
-function buildStrings() {
+const NUT_TOP = 370;
+const NUT_BOT = 380;
+
+// Per-style geometry: headstock outline, nut extent, where each string
+// (index 0 = low E side) crosses the nut, and its peg post + knob spot.
+const HEADSTOCKS = {
+  // Acoustic 3+3: low strings up the left, high strings down the right.
+  acoustic: {
+    outline: "M 95 388 L 95 78 Q 95 56 117 56 L 138 56 Q 150 66 162 56 L 183 56 Q 205 56 205 78 L 205 388 Z",
+    nut: [95, 205],
+    nutXs: [105, 123, 141, 159, 177, 195],
+    pegs: [
+      { post: [113, 265], knob: [58, 265] },
+      { post: [113, 175], knob: [58, 175] },
+      { post: [113, 85],  knob: [58, 85] },
+      { post: [187, 85],  knob: [242, 85] },
+      { post: [187, 175], knob: [242, 175] },
+      { post: [187, 265], knob: [242, 265] },
+    ],
+  },
+  // Electric 6-in-line (Fender-style): all knobs on one side,
+  // low E's peg closest to the nut.
+  electric: {
+    outline: "M 112 388 L 104 100 Q 102 62 140 62 L 198 66 Q 230 68 216 94 Q 203 118 199 158 Q 193 210 192 388 Z",
+    nut: [110, 190],
+    nutXs: [119, 131.4, 143.8, 156.2, 168.6, 181],
+    pegs: [
+      { post: [120, 330], knob: [58, 330] },
+      { post: [119, 280], knob: [58, 280] },
+      { post: [118, 230], knob: [58, 230] },
+      { post: [117, 180], knob: [58, 180] },
+      { post: [116, 130], knob: [58, 130] },
+      { post: [115, 80],  knob: [58, 80] },
+    ],
+  },
+};
+
+function pegLabelSvg(noteStr) {
+  const m = noteStr.match(/^([A-G][b#]?)(\d)$/);
+  return noteLabel(m[1]) + "<tspan class='oct' dy='3'>" + m[2] + "</tspan>";
+}
+
+function buildHeadstock() {
   const t = currentTuning();
-  stringGrid.innerHTML = "";
-  // Headstock-ish 3+3: low strings on the left, high on the right, high at top.
-  const order = [2, 3, 1, 4, 0, 5];
-  for (const idx of order) {
-    const b = document.createElement("button");
-    b.className = "string-btn";
-    b.dataset.index = idx;
-    b.innerHTML = "<span class='note'>" + labelHtml(t.strings[idx]) + "</span>" +
-                  "<span class='strnum'>STR " + (6 - idx) + "</span>";
-    b.addEventListener("click", () => playString(idx));
-    stringGrid.appendChild(b);
-  }
+  const hs = HEADSTOCKS[state.guitar];
+  let s = "<svg id='headstock-svg' viewBox='0 0 300 430'>";
+  s += "<path class='hs-body' d='" + hs.outline + "'/>";
+  s += "<rect class='hs-nut' x='" + hs.nut[0] + "' y='" + NUT_TOP + "' width='" +
+       (hs.nut[1] - hs.nut[0]) + "' height='" + (NUT_BOT - NUT_TOP) + "' rx='3'/>";
+  hs.nutXs.forEach((x, i) => {
+    const w = (2.4 - 0.22 * i).toFixed(2);
+    const post = hs.pegs[i].post;
+    // String: nut to peg post, plus a stub below the nut toward the neck.
+    s += "<line class='hs-string' x1='" + x + "' y1='" + NUT_TOP + "' x2='" + post[0] +
+         "' y2='" + post[1] + "' stroke-width='" + w + "'/>";
+    s += "<line class='hs-string' x1='" + x + "' y1='" + NUT_BOT + "' x2='" + x +
+         "' y2='396' stroke-width='" + w + "'/>";
+    s += "<text class='hs-strnum' x='" + x + "' y='411'>" + (6 - i) + "</text>";
+  });
+  hs.pegs.forEach((p, i) => {
+    s += "<g class='peg' data-index='" + i + "'>" +
+         "<line class='shaft' x1='" + p.post[0] + "' y1='" + p.post[1] + "' x2='" + p.knob[0] + "' y2='" + p.knob[1] + "'/>" +
+         "<circle class='post' cx='" + p.post[0] + "' cy='" + p.post[1] + "' r='5'/>" +
+         "<ellipse class='knob' cx='" + p.knob[0] + "' cy='" + p.knob[1] + "' rx='19' ry='13'/>" +
+         "<text class='peg-label' x='" + p.knob[0] + "' y='" + (p.knob[1] + 4.5) + "'>" + pegLabelSvg(t.strings[i]) + "</text>" +
+         "<circle class='hit' cx='" + p.knob[0] + "' cy='" + p.knob[1] + "' r='31'/>" +
+         "</g>";
+  });
+  s += "</svg>";
+  headstockWrap.innerHTML = s;
+  headstockWrap.querySelectorAll(".peg").forEach((g) => {
+    g.addEventListener("click", () => playString(+g.dataset.index));
+  });
 }
 
 function playString(idx) {
@@ -481,11 +557,11 @@ function playString(idx) {
   pluck(noteToMidi(t.strings[idx]));
   lastString = idx;
   clearTimeout(ringTimer);
-  stringGrid.querySelectorAll(".string-btn").forEach((b) => {
-    b.classList.toggle("ringing", +b.dataset.index === idx);
+  headstockWrap.querySelectorAll(".peg").forEach((g) => {
+    g.classList.toggle("ringing", +g.dataset.index === idx);
   });
   ringTimer = setTimeout(() => {
-    stringGrid.querySelectorAll(".string-btn").forEach((b) => b.classList.remove("ringing"));
+    headstockWrap.querySelectorAll(".peg").forEach((g) => g.classList.remove("ringing"));
   }, 900);
 }
 
@@ -516,10 +592,19 @@ TUNINGS.forEach((t) => {
     state.tuning = t.id;
     saveState();
     selectChip(tuningRow, (c) => c.dataset.tuning === t.id);
-    buildStrings();
+    buildHeadstock();
     lastString = null;
   });
   tuningRow.appendChild(b);
+});
+
+document.querySelectorAll(".guitar-chip").forEach((b) => {
+  b.addEventListener("click", () => {
+    state.guitar = b.dataset.guitar;
+    saveState();
+    selectChip($("guitar-row"), (c) => c.dataset.guitar === state.guitar);
+    buildHeadstock();
+  });
 });
 
 document.querySelectorAll(".lock-chip").forEach((b) => {
@@ -590,7 +675,8 @@ setA4(state.a4);
 $("repeat-check").checked = state.repeat;
 selectChip(tuningRow, (c) => c.dataset.tuning === state.tuning);
 selectChip($("lock-row"), (c) => c.dataset.lock === state.lock);
-buildStrings();
+selectChip($("guitar-row"), (c) => c.dataset.guitar === state.guitar);
+buildHeadstock();
 goTo(0);
 requestAnimationFrame(loop);
 

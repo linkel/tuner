@@ -103,50 +103,60 @@ html, body {
   border-radius: 16px;
 }
 
-/* ---------- Play pane ---------- */
+/* ---------- Play pane: headstock ---------- */
 
-#string-grid {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 16px 64px;
-}
-
-.string-btn {
-  width: 72px;
-  height: 72px;
-  border-radius: 50%;
-  border: 2px solid var(--panel-2);
-  background: var(--panel);
-  color: var(--text);
-  cursor: pointer;
+#headstock-wrap {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
   display: flex;
-  flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 1px;
-  transition: background 0.15s, border-color 0.15s, box-shadow 0.3s;
 }
-.string-btn .note {
-  font-size: 22px;
-  font-weight: 700;
-  line-height: 1;
+
+#headstock-svg {
+  height: 100%;
+  max-height: 460px;
+  max-width: 92%;
+  aspect-ratio: 300 / 430;
 }
-.string-btn .note sub {
-  font-size: 12px;
-  font-weight: 400;
-  color: var(--text-dim);
-}
-.string-btn .strnum {
+
+.hs-body { fill: var(--panel); stroke: var(--panel-2); stroke-width: 2.5; }
+.hs-nut { fill: #9aa0b5; }
+.hs-string { stroke: #c7ccdc; fill: none; }
+.hs-strnum {
+  fill: var(--text-dim);
   font-size: 10px;
-  color: var(--text-dim);
-  letter-spacing: 0.06em;
+  text-anchor: middle;
+  font-family: inherit;
 }
-.string-btn:active,
-.string-btn.ringing {
-  background: var(--panel-2);
-  border-color: var(--accent);
-  box-shadow: 0 0 18px rgba(255, 182, 72, 0.35);
+
+.peg { cursor: pointer; }
+.peg .shaft { stroke: #3a3f52; stroke-width: 5; stroke-linecap: round; }
+.peg .post { fill: #8b90a5; }
+.peg .knob {
+  fill: var(--panel-2);
+  stroke: #4a5065;
+  stroke-width: 1.5;
+  transition: fill 0.15s, stroke 0.15s;
 }
+.peg .peg-label {
+  fill: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+  text-anchor: middle;
+  font-family: inherit;
+  pointer-events: none;
+}
+.peg .peg-label .oct { font-size: 9px; font-weight: 400; fill: var(--text-dim); }
+.peg .hit { fill: transparent; pointer-events: all; }
+.peg.ringing .knob {
+  fill: var(--accent);
+  stroke: var(--accent-dim);
+  filter: drop-shadow(0 0 8px rgba(255, 182, 72, 0.6));
+}
+.peg.ringing .peg-label { fill: #1a1408; }
+.peg.ringing .peg-label .oct { fill: #5c451c; }
 
 .toggle-row {
   display: flex;
@@ -331,8 +341,6 @@ html, body {
 
 /* Short screens (iPhone SE etc.) */
 @media (max-height: 660px) {
-  .string-btn { width: 62px; height: 62px; }
-  #string-grid { gap: 10px 52px; }
   #note-name { font-size: 50px; }
   #note-readout { min-height: 96px; }
 }

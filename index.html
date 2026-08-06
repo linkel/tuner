@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>Tuner</title>
+  <meta name="theme-color" content="#12141c">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Tuner">
+  <link rel="manifest" href="manifest.json">
+  <link rel="apple-touch-icon" href="icon-180.png">
+  <link rel="icon" href="icon-180.png">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <main id="app">
+
+    <!-- Tabs -->
+    <nav id="tabs">
+      <button id="tab-play" class="tab active">Play</button>
+      <button id="tab-listen" class="tab">Listen</button>
+      <div id="tab-underline"></div>
+    </nav>
+
+    <!-- Swipeable panes -->
+    <div id="pane-viewport">
+      <div id="panes">
+
+        <!-- Play: tune by ear -->
+        <section class="pane" id="pane-play">
+          <div id="string-grid"></div>
+          <label class="toggle-row">
+            <input type="checkbox" id="repeat-check">
+            <span>Auto-repeat every 3&thinsp;s</span>
+          </label>
+        </section>
+
+        <!-- Listen: mic tuner -->
+        <section class="pane" id="pane-listen">
+          <div id="glow" aria-hidden="true"></div>
+          <div id="lock-row" class="chip-row">
+            <button class="chip lock-chip" data-lock="auto">Auto</button>
+            <button class="chip lock-chip" data-lock="strings">Strings</button>
+          </div>
+          <div id="dial-wrap">
+            <svg id="dial" viewBox="0 0 300 175" aria-hidden="true">
+              <g id="dial-ticks"></g>
+              <text x="26" y="160" class="dial-end">&#9837;</text>
+              <text x="274" y="160" class="dial-end">&#9839;</text>
+              <g id="needle" transform="rotate(0 150 162)">
+                <line x1="150" y1="162" x2="150" y2="28" class="needle-line"/>
+              </g>
+              <circle cx="150" cy="162" r="9" class="needle-hub"/>
+            </svg>
+          </div>
+          <div id="note-readout">
+            <div id="note-name">&mdash;</div>
+            <div id="cents-readout">Listening&hellip;</div>
+            <div id="string-hint"></div>
+          </div>
+          <div id="mic-msg" class="hidden">
+            <p id="mic-msg-text">The tuner needs your microphone.</p>
+            <button id="mic-retry">Enable microphone</button>
+          </div>
+        </section>
+
+      </div>
+    </div>
+
+    <!-- Shared settings -->
+    <section id="settings">
+      <div class="setting-group">
+        <div class="setting-label">Tuning</div>
+        <div id="tuning-row" class="chip-row"></div>
+      </div>
+      <div class="setting-group">
+        <div class="setting-label">Calibration</div>
+        <div id="a4-row">
+          <button id="a4-minus" class="mini-btn" aria-label="Lower reference pitch">&minus;</button>
+          <div id="a4-value">A4 = 440 Hz</div>
+          <button id="a4-plus" class="mini-btn" aria-label="Raise reference pitch">+</button>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

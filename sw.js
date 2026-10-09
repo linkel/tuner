@@ -1,5 +1,5 @@
 // Bump the version when you change any file, so clients pick up the update.
-const CACHE = "tuner-v1";
+const CACHE = "tuner-v2";
 
 const ASSETS = [
   ".",

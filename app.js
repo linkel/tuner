@@ -63,134 +63,283 @@ function currentTuning() {
   return TUNINGS.find((t) => t.id === state.tuning);
 }
 
+/* ================= Debug overlay ================= */
+
+// Toggle by tapping the A4 calibration readout 5 times quickly. Shows audio
+// and mic state live, plus a short event log, for diagnosing glitches on
+// the phone itself (persists across launches until toggled off).
+let debugOn = localStorage.getItem("tuner-debug") === "1";
+const debugLines = [];
+
+function debugLog(msg) {
+  debugLines.push(new Date().toLocaleTimeString() + "  " + msg);
+  if (debugLines.length > 8) debugLines.shift();
+}
+
+function renderDebug() {
+  let el = document.getElementById("debug");
+  if (!debugOn) { if (el) el.remove(); return; }
+  if (!el) {
+    el = document.createElement("pre");
+    el.id = "debug";
+    document.body.appendChild(el);
+  }
+  const track = micStream && micStream.getAudioTracks()[0];
+  let rms = 0;
+  if (micBuf) { for (let i = 0; i < WINDOW; i++) rms += micBuf[i] * micBuf[i]; rms = Math.sqrt(rms / WINDOW); }
+  el.textContent =
+    "ctx: " + (ctx ? ctx.state + " " + ctx.sampleRate + " Hz" : "none") +
+    "   session: " + (navigator.audioSession ? navigator.audioSession.type : "n/a") + "\n" +
+    "mic: " + (track ? track.readyState + (track.muted ? " MUTED" : "") : "off") +
+    "   rms: " + rms.toFixed(4) + "\n" + debugLines.join("\n");
+}
+
 /* ================= Audio ================= */
 
 let ctx = null;
 let masterGain = null;
 
+// iOS Safari 17+: "playback" makes tones play even with the silent switch on,
+// and keeps them out of the quieter voice-call routing iOS uses while the mic
+// is open. Must be "play-and-record" while capturing.
+function setAudioSession(type) {
+  if (navigator.audioSession) {
+    try { navigator.audioSession.type = type; } catch (e) { /* unsupported */ }
+  }
+}
+
 function ensureAudio() {
   if (!ctx) {
+    if (!micStream) setAudioSession("playback");
     ctx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: "interactive" });
     masterGain = ctx.createGain();
     masterGain.gain.value = 0.9;
     masterGain.connect(ctx.destination);
+    ctx.addEventListener("statechange", onAudioStateChange);
   }
-  if (ctx.state === "suspended") ctx.resume();
+  // iOS also has an "interrupted" state (calls, Siri, other apps' audio).
+  if (ctx.state !== "running") ctx.resume().catch(() => {});
 }
 
-document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible" && ctx) ctx.resume();
+// Starting audio needs a user gesture. On touch screens pointerdown doesn't
+// count, so also resume on the end of every tap; a note queued on pointerdown
+// starts as soon as this lets the context run.
+["pointerup", "touchend", "click"].forEach((type) => {
+  document.addEventListener(type, () => {
+    if (ctx && ctx.state !== "running") ctx.resume().catch(() => {});
+  }, true);
 });
 
-/* ---- Karplus-Strong plucked string ---- */
+/* ---- Additive plucked string ----
+   Built harmonic by harmonic rather than from a Karplus-Strong noise burst,
+   so brightness is fully under control: a pluck-position spectrum that rolls
+   off steeply above ~2 kHz, with upper harmonics dying away faster than the
+   fundamental, the way a real string mellows as it rings. */
 
 const pluckCache = new Map(); // "midi@a4" -> AudioBuffer
+
+const PLUCK_SECONDS = 4;
+const PLUCK_POS = 0.2;      // pluck point as a fraction of string length
+const PLUCK_TILT = 1.0;     // harmonic amplitude falls as 1 / h^tilt
+const PLUCK_CUTOFF = 2000;  // Hz; -12 dB/octave above this
+// Hz; partials below this are weakened, as a guitar body radiates them weakly.
+// Phone speakers can't reproduce them either, so their level is better spent
+// on the midrange where the pitch is actually heard.
+const PLUCK_BODY = 250;
+const INHARMONICITY = 0.00008;
+
+function renderPluck(freq, sr) {
+  const n = Math.floor(sr * PLUCK_SECONDS);
+  const acc = new Float64Array(n);
+  const sustain = 6 * Math.pow(82 / freq, 0.3); // fundamental T60, seconds
+
+  for (let h = 1; h <= 48; h++) {
+    const f = h * freq * Math.sqrt(1 + INHARMONICITY * h * h);
+    if (f > 6000 || f > sr * 0.45) break;
+    const amp = Math.abs(Math.sin(Math.PI * h * PLUCK_POS)) / Math.pow(h, PLUCK_TILT) /
+                Math.sqrt(1 + Math.pow(f / PLUCK_CUTOFF, 4)) /
+                Math.sqrt(1 + Math.pow(PLUCK_BODY / f, 2));
+    if (amp < 1e-4) continue; // node at the pluck point
+    const t60 = sustain / (1 + Math.pow(f / 1000, 1.3));
+    // Damped sinusoid amp * r^k * sin(w k + phase) via its two-term recurrence.
+    const r = Math.pow(0.001, 1 / (t60 * sr));
+    const w = 2 * Math.PI * f / sr;
+    const c = 2 * r * Math.cos(w), r2 = r * r;
+    const phase = h * 2.4; // spread phases to keep the peak (and loudness jumps) down
+    let y0 = amp * Math.sin(phase);
+    let y1 = amp * Math.sin(phase - w) / r;
+    for (let k = 0; k < n; k++) {
+      acc[k] += y0;
+      const y = c * y0 - r2 * y1;
+      y1 = y0;
+      y0 = y;
+    }
+  }
+
+  // Raised-cosine attack so the onset has no click, then normalize and
+  // fade the tail to silence.
+  const attack = Math.floor(sr * 0.008);
+  for (let i = 0; i < attack; i++) acc[i] *= 0.5 - 0.5 * Math.cos(Math.PI * i / attack);
+  let peak = 0;
+  for (let i = 0; i < n; i++) peak = Math.max(peak, Math.abs(acc[i]));
+  const norm = peak > 0 ? 0.8 / peak : 1;
+  const fadeStart = n - Math.floor(sr * 0.3);
+  const data = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    let v = acc[i] * norm;
+    if (i > fadeStart) v *= (n - i) / (n - fadeStart);
+    data[i] = v;
+  }
+  return data;
+}
 
 function getPluckBuffer(midi) {
   const key = midi + "@" + state.a4;
   const cached = pluckCache.get(key);
   if (cached) return cached;
-
-  const freq = midiToFreq(midi);
-  const sr = ctx.sampleRate;
-  const seconds = 4;
-  const n = Math.floor(sr * seconds);
-  const data = new Float32Array(n);
-
-  // Fractional delay line. The two-point average adds half a sample of
-  // delay, so aim the interpolated read at (period - 0.5) samples.
-  const period = sr / freq;
-  const d = period - 0.5;
-  const di = Math.floor(d);
-  const df = d - di;
-  const init = di + 3;
-
-  // Excitation: lowpassed noise for a softer pick attack…
-  let prev = 0;
-  for (let i = 0; i < init; i++) {
-    const w = Math.random() * 2 - 1;
-    data[i] = (w + prev) / 2;
-    prev = w;
-  }
-  let p = 0;
-  for (let i = 0; i < init; i++) { data[i] = (data[i] + p) / 2; p = data[i]; }
-  // …with a pick-position comb (~12% along the string) for realism.
-  const pick = Math.max(1, Math.round(period * 0.12));
-  for (let i = init - 1; i >= pick; i--) data[i] -= 0.5 * data[i - pick];
-
-  // Loop gain sets sustain: about -60 dB after 5 seconds.
-  const g = Math.pow(0.001, 1 / (freq * 5));
-  for (let i = init; i < n; i++) {
-    const x0 = data[i - di] * (1 - df) + data[i - di - 1] * df;
-    const x1 = data[i - di - 1] * (1 - df) + data[i - di - 2] * df;
-    data[i] = g * 0.5 * (x0 + x1);
-  }
-
-  // Round off the pick transient: blend in a lowpassed copy over the
-  // first 80 ms, strongest at the very start, then a short fade-in so
-  // the onset has no instantaneous edge.
-  const soft = Math.floor(sr * 0.08);
-  let lp = 0;
-  for (let i = 0; i < soft; i++) {
-    lp += 0.22 * (data[i] - lp);
-    const mix = 1 - i / soft;
-    data[i] = data[i] * (1 - mix) + lp * mix;
-  }
-  const fadeIn = Math.floor(sr * 0.012);
-  for (let i = 0; i < fadeIn; i++) data[i] *= i / fadeIn;
-
-  // Normalize and fade the tail to silence.
-  let peak = 0;
-  for (let i = 0; i < n; i++) peak = Math.max(peak, Math.abs(data[i]));
-  const norm = peak > 0 ? 0.8 / peak : 1;
-  const fadeStart = n - Math.floor(sr * 0.3);
-  for (let i = 0; i < n; i++) {
-    let v = data[i] * norm;
-    if (i > fadeStart) v *= (n - i) / (n - fadeStart);
-    data[i] = v;
-  }
-
-  const buf = ctx.createBuffer(1, n, sr);
+  const data = renderPluck(midiToFreq(midi), ctx.sampleRate);
+  const buf = ctx.createBuffer(1, data.length, ctx.sampleRate);
   buf.copyToChannel(data, 0);
   pluckCache.set(key, buf);
   return buf;
 }
 
+// One note at a time: a new pluck quickly damps the previous one, so
+// overlapping notes never stack up and clip.
+let voice = null;
+
 function pluck(midi) {
   ensureAudio();
+  const now = ctx.currentTime;
+  if (voice) {
+    voice.gain.gain.setTargetAtTime(0, now, 0.02);
+    voice.src.stop(now + 0.25);
+  }
   const src = ctx.createBufferSource();
   src.buffer = getPluckBuffer(midi);
-  src.connect(masterGain);
-  src.start();
+  const gain = ctx.createGain();
+  src.connect(gain);
+  gain.connect(masterGain);
+  src.start(now);
+  voice = { src, gain };
 }
 
 /* ================= Pitch detection (MPM / NSDF) ================= */
 
 let micStream = null;
+let micSource = null;
 let analyser = null;
 let micBuf = null;
+let micStarting = false;
+let silentSince = null;    // when the mic last started delivering pure digital silence
+let lastAutoRestart = -Infinity;
 
 const FFT_SIZE = 4096;
 const WINDOW = 2048;
 
+// The mic only runs while the Listen tab is showing. iOS kills capture when
+// the page is backgrounded anyway, and an open mic switches iOS into a
+// quieter call-style audio mode that would muffle the Play tab's tones.
+function micWanted() {
+  return paneIndex === 1 && document.visibilityState === "visible";
+}
+
+function micLive() {
+  return !!micStream && micStream.getAudioTracks().some((t) => t.readyState === "live");
+}
+
 async function startMic() {
-  if (micStream) return;
-  setMicMsg("Waiting for microphone permission…", false);
+  if (micLive() || micStarting) return;
+  stopMic();
+  micStarting = true;
+  // Only mention permission if we're actually kept waiting (i.e. prompted),
+  // so re-opening the tab doesn't flash the message.
+  const waitMsg = setTimeout(() => setMicMsg("Waiting for microphone permission…", false), 300);
   try {
-    micStream = await navigator.mediaDevices.getUserMedia({
+    setAudioSession("play-and-record");
+    const stream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
     });
+    if (!micWanted()) {               // user swiped away while we waited
+      stream.getTracks().forEach((t) => t.stop());
+      setAudioSession("playback");
+      return;
+    }
+    micStream = stream;
     ensureAudio();
-    const source = ctx.createMediaStreamSource(micStream);
+    micSource = ctx.createMediaStreamSource(stream);
     analyser = ctx.createAnalyser();
     analyser.fftSize = FFT_SIZE;
-    source.connect(analyser);
+    micSource.connect(analyser);
     micBuf = new Float32Array(FFT_SIZE);
+    silentSince = null;
+    stream.getAudioTracks().forEach((t) => {
+      t.addEventListener("ended", () => {
+        debugLog("mic track ended");
+        if (micStream === stream && micWanted()) restartMic();
+      });
+      t.addEventListener("mute", () => debugLog("mic track muted"));
+      t.addEventListener("unmute", () => debugLog("mic track unmuted"));
+    });
     micMsg.classList.add("hidden");
+    debugLog("mic started @ " + ctx.sampleRate + " Hz");
   } catch (e) {
-    micStream = null;
-    setMicMsg("Microphone access was blocked. Allow it in Settings for this site, then try again.", true);
+    setAudioSession("playback");
+    debugLog("getUserMedia failed: " + e.name);
+    setMicMsg(e.name === "NotAllowedError"
+      ? "Microphone access was blocked. Allow it in Settings for this site, then try again."
+      : "Couldn't start the microphone. Tap to try again.", true);
+  } finally {
+    clearTimeout(waitMsg);
+    micStarting = false;
   }
+}
+
+function stopMic() {
+  if (micSource) micSource.disconnect();
+  if (micStream) {
+    micStream.getTracks().forEach((t) => t.stop());
+    setAudioSession("playback");
+  }
+  micStream = micSource = analyser = null;
+}
+
+function restartMic() {
+  debugLog("restarting mic");
+  stopMic();
+  startMic();
+}
+
+// Called when the analyser hands back nothing but exact zeros. A real mic
+// always has some noise, so this means capture or the audio context has
+// silently died (common on iOS after an interruption). Try a fresh start
+// once; if that doesn't revive it, ask for a tap, which also unlocks audio.
+function onDeadMic(now) {
+  if (silentSince === null) { silentSince = now; return; }
+  if (now - silentSince < 1500) return;
+  silentSince = null;
+  if (now - lastAutoRestart > 8000) {
+    lastAutoRestart = now;
+    if (ctx.state !== "running") ctx.resume().catch(() => {});
+    restartMic();
+  } else {
+    stopMic();
+    setMicMsg("The microphone stopped responding.", true);
+  }
+}
+
+function onAudioStateChange() {
+  debugLog("audio context " + ctx.state);
+  if (ctx.state === "running") {
+    if (micLive()) micMsg.classList.add("hidden");
+    return;
+  }
+  if (!micWanted()) return;
+  ctx.resume().catch(() => {});
+  // If resuming needs a gesture, the retry button provides one.
+  setTimeout(() => {
+    if (ctx.state !== "running" && micWanted()) setMicMsg("Audio was paused.", true);
+  }, 500);
 }
 
 function setMicMsg(text, showRetry) {
@@ -275,6 +424,10 @@ function analyzeFrame(now) {
   if (!frameToggle) return;
 
   analyser.getFloatTimeDomainData(micBuf);
+  let anySignal = false;
+  for (let i = 0; i < FFT_SIZE; i += 16) if (micBuf[i] !== 0) { anySignal = true; break; }
+  if (anySignal) silentSince = null;
+  else onDeadMic(now);
   const freq = detectPitch(micBuf, ctx.sampleRate);
 
   if (freq) {
@@ -365,7 +518,13 @@ function releaseWakeLock() {
 }
 
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible" && paneIndex === 1) requestWakeLock();
+  if (micWanted()) {
+    ensureAudio();
+    restartMic(); // iOS ends capture in the background; start clean
+    requestWakeLock();
+  } else if (document.visibilityState === "hidden") {
+    stopMic();
+  }
 });
 
 /* ================= UI: elements ================= */
@@ -414,6 +573,7 @@ function goTo(i) {
     startMic();
     requestWakeLock();
   } else {
+    stopMic();
     releaseWakeLock();
   }
 }
@@ -522,7 +682,7 @@ function pegLabelSvg(noteStr) {
 function buildHeadstock() {
   const t = currentTuning();
   const hs = HEADSTOCKS[state.guitar];
-  let s = "<svg id='headstock-svg' viewBox='0 0 300 430'>";
+  let s = "<svg id='headstock-svg' viewBox='0 46 300 372'>";
   s += "<path class='hs-body' d='" + hs.outline + "'/>";
   s += "<rect class='hs-nut' x='" + hs.nut[0] + "' y='" + NUT_TOP + "' width='" +
        (hs.nut[1] - hs.nut[0]) + "' height='" + (NUT_BOT - NUT_TOP) + "' rx='3'/>";
@@ -540,17 +700,36 @@ function buildHeadstock() {
     s += "<g class='peg' data-index='" + i + "'>" +
          "<line class='shaft' x1='" + p.post[0] + "' y1='" + p.post[1] + "' x2='" + p.knob[0] + "' y2='" + p.knob[1] + "'/>" +
          "<circle class='post' cx='" + p.post[0] + "' cy='" + p.post[1] + "' r='5'/>" +
-         "<ellipse class='knob' cx='" + p.knob[0] + "' cy='" + p.knob[1] + "' rx='19' ry='13'/>" +
-         "<text class='peg-label' x='" + p.knob[0] + "' y='" + (p.knob[1] + 4.5) + "'>" + pegLabelSvg(t.strings[i]) + "</text>" +
-         "<circle class='hit' cx='" + p.knob[0] + "' cy='" + p.knob[1] + "' r='31'/>" +
+         "<ellipse class='knob' cx='" + p.knob[0] + "' cy='" + p.knob[1] + "' rx='28' ry='19'/>" +
+         "<text class='peg-label' x='" + p.knob[0] + "' y='" + (p.knob[1] + 6) + "'>" + pegLabelSvg(t.strings[i]) + "</text>" +
          "</g>";
   });
   s += "</svg>";
   headstockWrap.innerHTML = s;
-  headstockWrap.querySelectorAll(".peg").forEach((g) => {
-    g.addEventListener("click", () => playString(+g.dataset.index));
-  });
 }
+
+// How far (in SVG units) from a peg's knob-to-post line a tap still counts.
+const PEG_REACH = 50;
+
+function distToSegment(x, y, a, b) {
+  const dx = b[0] - a[0], dy = b[1] - a[1];
+  const t = Math.max(0, Math.min(1, ((x - a[0]) * dx + (y - a[1]) * dy) / (dx * dx + dy * dy)));
+  return Math.hypot(x - a[0] - t * dx, y - a[1] - t * dy);
+}
+
+// Any touch near a peg plays the closest one, so there are no dead zones
+// between or around the knobs. Fires on touch-down for an instant response
+// (a click would wait for lift-off and is dropped if the finger slides).
+headstockWrap.addEventListener("pointerdown", (e) => {
+  const svg = headstockWrap.querySelector("svg");
+  const pt = new DOMPoint(e.clientX, e.clientY).matrixTransform(svg.getScreenCTM().inverse());
+  let best = -1, bestDist = PEG_REACH;
+  HEADSTOCKS[state.guitar].pegs.forEach((p, i) => {
+    const d = distToSegment(pt.x, pt.y, p.knob, p.post);
+    if (d < bestDist) { bestDist = d; best = i; }
+  });
+  if (best >= 0) playString(best);
+});
 
 function playString(idx) {
   const t = currentTuning();
@@ -639,15 +818,32 @@ function holdable(el, step) {
 holdable($("a4-minus"), -1);
 holdable($("a4-plus"), +1);
 
-micRetry.addEventListener("click", startMic);
+micRetry.addEventListener("click", () => {
+  ensureAudio();
+  restartMic();
+});
 
 /* ================= Animation loop ================= */
+
+let debugFrame = 0;
 
 function loop(now) {
   if (paneIndex === 1 && micStream) analyzeFrame(now);
   if (paneIndex === 1) renderFrame(now);
+  if (++debugFrame % 15 === 0) renderDebug();
   requestAnimationFrame(loop);
 }
+
+let debugTaps = [];
+a4Value.addEventListener("click", () => {
+  const now = performance.now();
+  debugTaps = debugTaps.filter((t) => now - t < 2000).concat(now);
+  if (debugTaps.length >= 5) {
+    debugTaps = [];
+    debugOn = !debugOn;
+    localStorage.setItem("tuner-debug", debugOn ? "1" : "0");
+  }
+});
 
 /* ================= Dial ticks ================= */
 

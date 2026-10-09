@@ -118,7 +118,7 @@ html, body {
   height: 100%;
   max-height: 460px;
   max-width: 92%;
-  aspect-ratio: 300 / 430;
+  aspect-ratio: 300 / 372;
 }
 
 .hs-body { fill: var(--panel); stroke: var(--panel-2); stroke-width: 2.5; }
@@ -142,14 +142,13 @@ html, body {
 }
 .peg .peg-label {
   fill: var(--text);
-  font-size: 13px;
+  font-size: 17px;
   font-weight: 700;
   text-anchor: middle;
   font-family: inherit;
   pointer-events: none;
 }
-.peg .peg-label .oct { font-size: 9px; font-weight: 400; fill: var(--text-dim); }
-.peg .hit { fill: transparent; pointer-events: all; }
+.peg .peg-label .oct { font-size: 11px; font-weight: 400; fill: var(--text-dim); }
 .peg.ringing .knob {
   fill: var(--accent);
   stroke: var(--accent-dim);
@@ -339,8 +338,34 @@ html, body {
   text-align: center;
 }
 
-/* Short screens (iPhone SE etc.) */
+/* Short screens (iPhone SE, mini in a Safari tab): give the headstock more room */
+@media (max-height: 700px) {
+  #app { gap: 6px; }
+  .pane { gap: 6px; }
+  #settings { gap: 6px; padding: 10px 12px; }
+  .setting-label { margin-bottom: 4px; }
+  .chip { padding: 6px 11px; }
+  .mini-btn { width: 34px; height: 34px; }
+  .toggle-row { padding: 2px 4px; }
+}
 @media (max-height: 660px) {
   #note-name { font-size: 50px; }
   #note-readout { min-height: 96px; }
+}
+
+/* ---------- Debug overlay ---------- */
+
+#debug {
+  position: fixed;
+  top: max(52px, calc(env(safe-area-inset-top) + 44px));
+  left: 6px;
+  right: 6px;
+  z-index: 10;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.75);
+  color: #9fe8b0;
+  font: 10px/1.35 ui-monospace, Menlo, monospace;
+  white-space: pre-wrap;
+  pointer-events: none;
 }
